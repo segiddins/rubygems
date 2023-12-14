@@ -27,26 +27,31 @@ module Bundler
       spec[1]&.each {|version| hash[:"#{platform}_#{version}"] = spec[0] }
     end.freeze
 
+    DEFAULT_GROUPS = [:default].freeze
+    private_constant :DEFAULT_GROUPS
+
+    EMPTY_ARRAY = [].freeze
+    private_constant :EMPTY_ARRAY
+
     def initialize(name, version, options = {}, &blk)
       type = options["type"] || :runtime
       super(name, version, type)
 
       @autorequire    = nil
-      @groups         = Array(options["group"] || :default).map(&:to_sym)
+      @groups         = options.key?("groups") ? Array(options["group"] || :default).map(&:to_sym) : DEFAULT_GROUPS
       @source         = options["source"]
       @path           = options["path"]
       @git            = options["git"]
       @github         = options["github"]
       @branch         = options["branch"]
       @ref            = options["ref"]
-      @glob           = options["glob"]
-      @platforms      = Array(options["platforms"])
+      @platforms      = options.key?("platforms") ? Array(options["platforms"]) : EMPTY_ARRAY
       @env            = options["env"]
       @should_include = options.fetch("should_include", true)
       @gemfile        = options["gemfile"]
       @force_ruby_platform = options["force_ruby_platform"] if options.key?("force_ruby_platform")
 
-      @autorequire = Array(options["require"] || []) if options.key?("require")
+      @autorequire = Array(options["require"] || EMPTY_ARRAY) if options.key?("require")
     end
 
     RUBY_PLATFORM_ARRAY = [Gem::Platform::RUBY].freeze
@@ -62,7 +67,13 @@ module Bundler
     end
 
     def expanded_platforms
-      @expanded_platforms ||= @platforms.map {|pl| PLATFORM_MAP[pl] }.compact.flatten.uniq
+      @expanded_platforms ||= begin
+        expanded_platforms = @platforms.map {|pl| PLATFORM_MAP[pl] }
+        expanded_platforms.compact!
+        expanded_platforms.flatten!
+        expanded_platforms.uniq!
+        expanded_platforms
+      end
     end
 
     def should_include?
@@ -77,7 +88,8 @@ module Bundler
       return true unless @env
       if @env.is_a?(Hash)
         @env.all? do |key, val|
-          ENV[key.to_s] && (val.is_a?(String) ? ENV[key.to_s] == val : ENV[key.to_s] =~ val)
+          env_value = ENV[key.to_s]
+          env_value && (val.is_a?(String) ? env_value == val : env_value.match?(val))
         end
       else
         ENV[@env.to_s]
