@@ -1,0 +1,258 @@
+name: release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - segiddins/automate-publishing
+
+permissions:
+  contents: read
+
+env:
+  gem_push: "false"
+  disable_blog_checksums_check: "true"
+  EDITOR: "cat"
+  GITHUB_REPO: ${{ github.repository }}
+  RAKE_GITHUB_ACTIONS: "true"
+
+jobs:
+  debug-pre-release:
+    name: Debug Pre-Release steps
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    environment:
+      name: Release
+    outputs:
+      SOURCE_DATE_EPOCH: ${{ steps.git-author.outputs.SOURCE_DATE_EPOCH }}
+      BUNDLER_BUILD_METADATA_GIT_SHA: ${{ steps.git-author.outputs.BUNDLER_BUILD_METADATA_GIT_SHA }}
+      AUTHOR_NAME: ${{ steps.git-author.outputs.AUTHOR_NAME }}
+      AUTHOR_EMAIL: ${{ steps.git-author.outputs.AUTHOR_EMAIL }}
+    steps:
+      - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+        with:
+          fetch-depth: 2 # TODO: delete when we're done debugging
+      - name: Print rubygems version
+        run: rake -r./bundler/lib/bundler/gem_tasks -p 'File.open(ENV["GITHUB_ENV"], "a") { |f| f << "RUBYGEMS_VERSION=#{Bundler::GemHelper.gemspec.version}\n" }'
+      - name: Print bundler version
+        run: rake -Cbundler -r./lib/bundler/gem_tasks -p 'File.open(ENV["GITHUB_ENV"], "a") { |f| f << "BUNDLER_VERSION=#{Bundler::GemHelper.gemspec.version}\n" }'
+      - id: git-author
+        name: Set git author
+        run: |
+          # TODO: delete HEAD~ when we're done debugging
+          git show HEAD~ --quiet --format="BUNDLER_BUILD_METADATA_GIT_SHA=%h%nAUTHOR_NAME=%aN%nAUTHOR_EMAIL=%aE%nSOURCE_DATE_EPOCH=%ct" >> $GITHUB_OUTPUT
+      - name: Log git info
+        run: printf '```json\n%s\n```\n' "${GIT_INFO}" >> $GITHUB_STEP_SUMMARY
+        env:
+          GIT_INFO: ${{ toJSON(steps.git-author.outputs) }}
+      - name: Delete tag
+        run: |
+          gh release delete v${{ env.RUBYGEMS_VERSION }} --cleanup-tag --yes || true
+          gh release delete bundler-v${{ env.BUNDLER_VERSION }} --cleanup-tag --yes || true
+
+          git push --delete origin v${{ env.RUBYGEMS_VERSION }} || true
+          git push --delete origin bundler-v${{ env.BUNDLER_VERSION }} || true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Delete web branches
+        run: |
+          gh api --method delete repos/rubygems/guides/git/refs/heads/segiddins/automate-publishing || true
+          gh api --method delete repos/rubygems/rubygems.github.io/git/refs/heads/segiddins/automate-publishing || true
+        env:
+          GITHUB_TOKEN: ${{ secrets.RUBYGEMS_RELEASE_GITHUB_TOKEN }}
+  build-bundler:
+    name: Build Bundler
+    runs-on: ubuntu-latest
+    needs: debug-pre-release
+    env:
+      SOURCE_DATE_EPOCH: ${{ needs.debug-pre-release.outputs.SOURCE_DATE_EPOCH }}
+      BUNDLER_BUILD_METADATA_GIT_SHA: ${{ needs.debug-pre-release.outputs.BUNDLER_BUILD_METADATA_GIT_SHA }}
+    steps:
+      - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+      - name: Setup ruby
+        uses: ruby/setup-ruby@a6e6f86333f0a2523ece813039b8b4be04560854 # v1.190.0
+        with:
+          ruby-version: 3.3.4
+          bundler: none
+      - name: Install Dependencies
+        run: bin/rake setup
+      - name: Build bundler
+        run: bin/rake bundler:build
+      - name: Print bundler build checksum
+        run: |
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          sha256sum bundler/pkg/*.gem >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          sha256sum bundler/pkg/*.gem >> bundler/pkg/bundler.sha256
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4.4.0
+        with:
+          if-no-files-found: error
+          name: bundler-build
+          path: |
+            bundler/pkg/*.gem
+            bundler/pkg/bundler.sha256
+  build-rubygems:
+    name: Build RubyGems
+    runs-on: ubuntu-latest
+    needs:
+      - debug-pre-release
+    env:
+      SOURCE_DATE_EPOCH: ${{ needs.debug-pre-release.outputs.SOURCE_DATE_EPOCH }}
+      BUNDLER_BUILD_METADATA_GIT_SHA: ${{ needs.debug-pre-release.outputs.BUNDLER_BUILD_METADATA_GIT_SHA }}
+    steps:
+      - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+      - name: Setup ruby
+        uses: ruby/setup-ruby@a6e6f86333f0a2523ece813039b8b4be04560854 # v1.190.0
+        with:
+          ruby-version: 3.3.4
+          bundler: none
+      - name: Install Dependencies
+        run: bin/rake setup
+      - name: Build RubyGems
+        run: bin/rake bundler:build_metadata package
+      - name: Print rubygems build checksum
+        run: |
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          sha256sum pkg/*.{tgz,zip,gem} >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          sha256sum pkg/*.{tgz,zip,gem} >> pkg/rubygems.sha256
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4.4.0
+        with:
+          if-no-files-found: error
+          name: rubygems-build
+          path: |
+            pkg/*.tgz
+            pkg/*.zip
+            pkg/*.gem
+            pkg/rubygems.sha256
+  release-bundler:
+    name: Release Bundler
+    runs-on: ubuntu-latest
+    needs:
+      - debug-pre-release
+      - build-bundler
+    permissions:
+      contents: write
+      id-token: write
+    environment:
+      name: Release
+    env:
+      SOURCE_DATE_EPOCH: ${{ needs.debug-pre-release.outputs.SOURCE_DATE_EPOCH }}
+      BUNDLER_BUILD_METADATA_GIT_SHA: ${{ needs.debug-pre-release.outputs.BUNDLER_BUILD_METADATA_GIT_SHA }}
+      VERIFY_PKG_CHECKSUMS: true
+    steps:
+      - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+      - name: Setup ruby
+        uses: ruby/setup-ruby@a6e6f86333f0a2523ece813039b8b4be04560854 # v1.190.0
+        with:
+          ruby-version: 3.3.4
+          bundler: none
+      - name: Configure RubyGems Credentials
+        uses: rubygems/configure-rubygems-credentials@main
+      - name: Install Dependencies
+        run: bin/rake setup
+      - name: Install release dependencies
+        run: bin/rake bundler:release:setup
+      - name: Configure git
+        run: |
+          git config --global user.email ${AUTHOR_EMAIL}
+          git config --global user.name ${AUTHOR_NAME}
+        env:
+          AUTHOR_NAME: ${{ needs.debug-pre-release.outputs.AUTHOR_NAME }}
+          AUTHOR_EMAIL: ${{ needs.debug-pre-release.outputs.AUTHOR_EMAIL }}
+      - name: Download bundler build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: bundler-build
+          path: bundler/pkg
+      - name: Run bundler release task
+        run: bin/rake bundler:release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_RELEASE_PAT: ${{ secrets.GITHUB_TOKEN }}
+  release-rubygems:
+    name: Release RubyGems
+    runs-on: ubuntu-latest
+    needs:
+      - debug-pre-release
+      - release-bundler
+      - build-rubygems
+    permissions:
+      contents: write
+      id-token: write
+    environment:
+      name: Release
+    env:
+      SOURCE_DATE_EPOCH: ${{ needs.debug-pre-release.outputs.SOURCE_DATE_EPOCH }}
+      BUNDLER_BUILD_METADATA_GIT_SHA: ${{ needs.debug-pre-release.outputs.BUNDLER_BUILD_METADATA_GIT_SHA }}
+      VERIFY_PKG_CHECKSUMS: true
+    steps:
+      - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+      - name: Clone guides.rubygems.org
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+        with:
+          repository: rubygems/guides
+          path: "guides.rubygems.org"
+          token: ${{ secrets.RUBYGEMS_RELEASE_GITHUB_TOKEN }}
+      - name: Clone blog.rubygems.org
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+        with:
+          repository: rubygems/rubygems.github.io
+          path: "blog.rubygems.org"
+          token: ${{ secrets.RUBYGEMS_RELEASE_GITHUB_TOKEN }}
+      - name: Change branches
+        run: |
+          mv blog.rubygems.org ..
+          mv guides.rubygems.org ..
+          git -C ../blog.rubygems.org checkout -b segiddins/automate-publishing
+          git -C ../blog.rubygems.org push --set-upstream origin segiddins/automate-publishing
+          git -C ../guides.rubygems.org checkout -b segiddins/automate-publishing
+          git -C ../guides.rubygems.org push --set-upstream origin segiddins/automate-publishing
+      - name: Download bundler build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: bundler-build
+          path: bundler/pkg
+      - name: Download rubygems build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: rubygems-build
+          path: pkg
+      - name: Setup ruby
+        uses: ruby/setup-ruby@a6e6f86333f0a2523ece813039b8b4be04560854 # v1.190.0
+        with:
+          ruby-version: 3.3.4
+          bundler: none
+      - name: Configure RubyGems Credentials
+        uses: rubygems/configure-rubygems-credentials@main
+      - name: Configure AWS credentials from Production account
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        # if: github.secret_source != 'None'
+        if: false
+        with:
+          role-to-assume: arn:aws:iam::048268392960:role/rubygems-ecr-pusher # TODO: proper ARN
+          aws-region: us-west-2
+      - name: Configure git
+        run: |
+          git config --global user.email ${AUTHOR_EMAIL}
+          git config --global user.name ${AUTHOR_NAME}
+        env:
+          AUTHOR_NAME: ${{ needs.debug-pre-release.outputs.AUTHOR_NAME }}
+          AUTHOR_EMAIL: ${{ needs.debug-pre-release.outputs.AUTHOR_EMAIL }}
+      - name: Install Dependencies
+        run: bin/rake setup
+      - name: Install release dependencies
+        run: bin/rake install_release_dependencies
+      - name: Run rubygems release task
+        run: bin/rake release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_RELEASE_PAT: ${{ secrets.GITHUB_TOKEN }}
+      - name: Print checksums
+        run: |
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          sha256sum bundler/pkg/*.gem pkg/*.{tgz,zip,gem} >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY

@@ -98,9 +98,10 @@ module Spec
         puts success_message
         puts
       else
-        system("git diff")
+        system("git --no-pager diff")
 
         puts
+        puts output
         puts error_message
         puts
 

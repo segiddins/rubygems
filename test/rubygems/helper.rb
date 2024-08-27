@@ -301,6 +301,7 @@ class Gem::TestCase < Test::Unit::TestCase
     ENV["SOURCE_DATE_EPOCH"] = nil
     ENV["BUNDLER_VERSION"] = nil
     ENV["RUBYGEMS_PREVENT_UPDATE_SUGGESTION"] = "true"
+    ENV["GEM_HOST_API_KEY"] = nil
 
     @current_dir = Dir.pwd
     @fetcher     = nil

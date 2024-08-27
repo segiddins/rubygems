@@ -2,6 +2,32 @@
 
 RakeFileUtils.verbose_flag = false
 
+if ENV["RAKE_GITHUB_ACTIONS"]
+  RakeFileUtils.verbose_flag = true
+  class Rake::Task
+    prepend(Module.new do
+      def execute(...)
+        puts "::group::#{"Execute #{name}"}"
+        puts investigation
+        super
+      ensure
+        puts "::endgroup::"
+      end
+
+      def invoke_with_call_chain(task_args, invocation_chain)
+        unless actions.empty?
+          puts "::group::Invoke #{name} #{format_trace_flags}"
+          puts invocation_chain.to_s
+          puts investigation
+        end
+        super
+      ensure
+        puts "::endgroup::" unless actions.empty?
+      end
+    end)
+  end
+end
+
 require "rubygems"
 require "rubygems/package_task"
 require "rake/testtask"
@@ -164,7 +190,7 @@ task rubocop: %w[rubocop:setup rubocop:run]
 # --------------------------------------------------------------------
 # Creating a release
 
-task prerelease: %w[clobber install_release_dependencies test bundler:build_metadata check_deprecations]
+task prerelease: %w[install_release_dependencies test bundler:build_metadata check_deprecations]
 task postrelease: %w[upload guides:publish blog:publish bundler:build_metadata:clean]
 
 desc "Check for deprecated methods with expired deprecation horizon"
@@ -208,25 +234,29 @@ task :generate_changelog, [:version] => [:install_release_dependencies] do |_t, 
 end
 
 desc "Release rubygems-#{v}"
-task release: :prerelease do
-  Rake::Task["package"].invoke
-  sh "gem push pkg/rubygems-update-#{v}.gem"
+task release: [:prerelease, :package] do
+  gem_push = !%w[n no nil false off 0].include?(ENV["gem_push"].to_s.downcase)
+  sh "gem push pkg/rubygems-update-#{v}.gem" if gem_push
   Rake::Task["postrelease"].invoke
 end
 
 Gem::PackageTask.new(spec) {}
 
-Rake::Task["package"].enhance ["pkg/rubygems-#{v}.tgz", "pkg/rubygems-#{v}.zip"]
+task package: ["pkg/rubygems-#{v}.tgz", "pkg/rubygems-#{v}.zip"] do
+  Rake::Task["verify_rubygems_checksums"].tap(&:reenable).invoke
+end
 
-file "pkg/rubygems-#{v}" => "pkg/rubygems-update-#{v}" do |t|
+directory "pkg/rubygems-#{v}" => "pkg/rubygems-update-#{v}" do |t|
   require "find"
 
   dest_root = File.expand_path t.name
 
   cd t.source do
+    files = []
     Find.find "." do |file|
       dest = File.expand_path file, dest_root
 
+      files << dest
       if File.directory? file
         mkdir_p dest
       else
@@ -234,6 +264,7 @@ file "pkg/rubygems-#{v}" => "pkg/rubygems-update-#{v}" do |t|
         safe_ln file, dest
       end
     end
+    File.lutime Gem.source_date_epoch, Gem.source_date_epoch, *files.reverse, dest_root
   end
 end
 
@@ -242,7 +273,7 @@ file "pkg/rubygems-#{v}.zip" => "pkg/rubygems-#{v}" do
     if Gem.win_platform?
       sh "7z a rubygems-#{v}.zip rubygems-#{v}"
     else
-      sh "zip -q -r rubygems-#{v}.zip rubygems-#{v}"
+      sh "zip -q -r -X rubygems-#{v}.zip rubygems-#{v}"
     end
   end
 end
@@ -252,12 +283,16 @@ file "pkg/rubygems-#{v}.tgz" => "pkg/rubygems-#{v}" do
     tar_version = `tar --version`
     if tar_version.include?("bsdtar")
       # bsdtar, as used by at least FreeBSD and macOS, uses `--uname` and `--gname`.
-      sh "tar -czf rubygems-#{v}.tgz --uname=rubygems:0 --gname=rubygems:0 rubygems-#{v}"
+      sh "tar -cf --uname=rubygems:0 --gname=rubygems:0 rubygems-#{v} | gzip -n > rubygems-#{v}.tgz"
     else # If a third variant is added, change this line to: elsif tar_version =~ /GNU tar/
       # GNU Tar, as used by many Linux distros, uses `--owner` and `--group`.
-      sh "tar -czf rubygems-#{v}.tgz --owner=rubygems:0 --group=rubygems:0 rubygems-#{v}"
+      sh "tar -cf --owner=rubygems:0 --group=rubygems:0 rubygems-#{v} | gzip -n > rubygems-#{v}.tgz"
     end
   end
+end
+
+task :verify_rubygems_checksums do
+  sh "sha256sum --check pkg/rubygems.sha256 --strict" if ENV["VERIFY_PKG_CHECKSUMS"]
 end
 
 desc "Upload the release to GitHub releases"
@@ -271,10 +306,12 @@ desc "Upload release to S3"
 task :upload_to_s3 do
   require "aws-sdk-s3"
 
+  gem_push = !%w[n no nil false off 0].include?(ENV["gem_push"].to_s.downcase)
+
   s3 = Aws::S3::Resource.new(region:"us-west-2")
   %w[zip tgz].each do |ext|
     obj = s3.bucket("oregon.production.s3.rubygems.org").object("rubygems/rubygems-#{v}.#{ext}")
-    obj.upload_file("pkg/rubygems-#{v}.#{ext}", acl: "public-read")
+    obj.upload_file("pkg/rubygems-#{v}.#{ext}", acl: "public-read") if gem_push
   end
 end
 
@@ -342,7 +379,7 @@ namespace "blog" do
 
   task "checksums" => "package" do
     require "net/http"
-    Dir["pkg/*{tgz,zip,gem}"].each do |file|
+    Dir["pkg/*.{tgz,zip,gem}"].each do |file|
       digest = OpenSSL::Digest::SHA256.file(file).hexdigest
       basename = File.basename(file)
 
@@ -351,6 +388,8 @@ namespace "blog" do
 
       release_url = URI("https://rubygems.org/#{file.end_with?("gem") ? "gems" : "rubygems"}/#{basename}")
       response = Net::HTTP.get_response(release_url)
+
+      next if ENV["disable_blog_checksums_check"] == "true"
 
       if response.is_a?(Net::HTTPSuccess)
         released_digest = OpenSSL::Digest::SHA256.hexdigest(response.body)
@@ -613,7 +652,7 @@ namespace :man do
       end
       index.map! do |(ronn, roff)|
         date = ENV["MAN_PAGES_DATE"] || Time.now.strftime("%Y-%m-%d")
-        sh "bin/ronn --warnings --roff --pipe --date #{date} #{ronn} > #{roff}"
+        sh "bin/ronn --warnings --roff --date #{date} #{ronn}"
         [File.read(ronn).split(" ").first, File.basename(roff)]
       end
       index = index.sort_by(&:first)
@@ -686,7 +725,9 @@ namespace :bundler do
 
   task build: ["bundler:build_metadata"] do
     Rake::Task["bundler:build_metadata:clean"].tap(&:reenable).invoke
+    Rake::Task["bundler:verify_checksums"].tap(&:reenable).invoke
   end
+
 
   desc "Push to rubygems.org"
   task "release:rubygem_push" => ["bundler:release:setup", "man:check", "bundler:build_metadata", "bundler:release:github"]
@@ -694,6 +735,10 @@ namespace :bundler do
   desc "Generates the Bundler changelog for a specific target version"
   task :generate_changelog, [:version] => [:install_release_dependencies] do |_t, opts|
     Release.for_bundler(opts[:version]).cut_changelog!
+  end
+
+  task :verify_checksums do
+    sh "sha256sum --check bundler/pkg/bundler.sha256 --strict" if ENV["VERIFY_PKG_CHECKSUMS"]
   end
 
   namespace :release do

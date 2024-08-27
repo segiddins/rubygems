@@ -41,7 +41,7 @@ module Spec
     end
 
     def git_commit_sha
-      ruby_core_tarball? ? "unknown" : git("rev-parse --short HEAD", source_root).strip
+      ruby_core_tarball? ? "unknown" : ENV.fetch("BUNDLER_BUILD_METADATA_GIT_SHA") { git("rev-parse --short HEAD", source_root) }.strip
     end
 
     extend self
