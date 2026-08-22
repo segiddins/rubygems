@@ -57,7 +57,7 @@ class Gem::Commands::SourcesCommand < Gem::Command
       if Gem.sources.include? source
         say "source #{source_uri} already present in the cache"
       else
-        source.load_specs :released
+        source.check_index!
         Gem.sources << source
         Gem.configuration.write
 
@@ -77,7 +77,7 @@ class Gem::Commands::SourcesCommand < Gem::Command
     source_uri = source.uri.to_s
 
     begin
-      source.load_specs :released
+      source.check_index!
       was_present = Gem.sources.include?(source)
       Gem.sources.append source
       Gem.configuration.write
@@ -101,7 +101,7 @@ class Gem::Commands::SourcesCommand < Gem::Command
     source_uri = source.uri.to_s
 
     begin
-      source.load_specs :released
+      source.check_index!
       was_present = Gem.sources.include?(source)
       Gem.sources.prepend source
       Gem.configuration.write

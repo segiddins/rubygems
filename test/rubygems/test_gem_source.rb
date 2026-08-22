@@ -42,6 +42,45 @@ class TestGemSource < Gem::TestCase
     assert !cache_dir.include?(":"), "#{cache_dir} should not contain a :"
   end
 
+  def test_check_index_compact_index
+    util_setup_compact_index util_spec("a", "1")
+
+    @source.check_index!
+
+    assert_includes @fetcher.paths, "#{@gem_repo}versions"
+
+    # only the presence of the index is checked, it is never downloaded
+    assert_empty @fetcher.requests
+    refute_includes @fetcher.paths, "#{@gem_repo}specs.#{Gem.marshal_version}.gz"
+  end
+
+  def test_check_index_falls_back_to_marshal_index
+    # no compact index data set up, only the Marshal indexes from setup
+    @source.check_index!
+
+    assert_includes @fetcher.paths, "#{@gem_repo}versions"
+    assert_includes @fetcher.paths, "#{@gem_repo}specs.#{Gem.marshal_version}.gz"
+  end
+
+  def test_check_index_file_uri
+    empty_dump = Gem::Util.gzip("\x04\x08[\x05".b)
+    File.binwrite(File.join(@tempdir, "specs.4.8.gz"), empty_dump)
+
+    source = Gem::Source.new "file://#{@tempdir}/"
+
+    source.check_index!
+
+    assert_empty @fetcher.paths
+  end
+
+  def test_check_index_from_unavailable_uri
+    source = Gem::Source.new "http://not-there.nothing"
+
+    assert_raise Gem::RemoteFetcher::FetchError do
+      source.check_index!
+    end
+  end
+
   def test_dependency_resolver_set_bundler_api
     response = Gem::Net::HTTPResponse.new "1.1", 200, "OK"
     response.uri = Gem::URI("http://example")

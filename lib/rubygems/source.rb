@@ -74,6 +74,18 @@ class Gem::Source
     new_dependency_resolver_set.tap {|set| set.prerelease = prerelease }
   end
 
+  ##
+  # Checks that gems can be fetched from this source, raising
+  # Gem::RemoteFetcher::FetchError when no index is available.
+  #
+  # Only the presence of the compact index is checked, so unlike #load_specs
+  # the index is not downloaded. Sources that do not serve a compact index
+  # fall back to loading their Marshal index.
+
+  def check_index!
+    load_specs :released unless fetch_compact_index_versions
+  end
+
   def hash # :nodoc:
     @uri.hash
   end
@@ -350,18 +362,21 @@ class Gem::Source
   end
 
   def new_dependency_resolver_set
-    return Gem::Resolver::IndexSet.new self if uri.scheme == "file"
+    response = fetch_compact_index_versions
 
-    bundler_api_uri = enforce_trailing_slash(compact_index_uri) + "versions"
+    return Gem::Resolver::IndexSet.new self unless response
 
-    begin
-      fetcher = Gem::RemoteFetcher.fetcher
-      response = fetcher.fetch_path bundler_api_uri, nil, true
-    rescue Gem::RemoteFetcher::FetchError
-      Gem::Resolver::IndexSet.new self
-    else
-      Gem::Resolver::APISet.new response.uri + "./info/"
-    end
+    Gem::Resolver::APISet.new response.uri + "./info/"
+  end
+
+  def fetch_compact_index_versions
+    return if uri.scheme == "file"
+
+    versions_uri = enforce_trailing_slash(compact_index_uri) + "versions"
+
+    Gem::RemoteFetcher.fetcher.fetch_path versions_uri, nil, true
+  rescue Gem::RemoteFetcher::FetchError
+    nil
   end
 
   def enforce_trailing_slash(uri)

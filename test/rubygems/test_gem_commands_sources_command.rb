@@ -155,6 +155,52 @@ https://rubygems.pkg.github.com/my-org/ added to sources
     assert_equal "", @ui.error
   end
 
+  def test_execute_add_compact_index_source
+    setup_fake_compact_index_source(@new_repo)
+
+    @cmd.handle_options %W[--add #{@new_repo}]
+
+    use_ui @ui do
+      @cmd.execute
+    end
+
+    assert_equal [@gem_repo, @new_repo], Gem.sources
+
+    expected = <<-EOF
+#{@new_repo} added to sources
+    EOF
+
+    assert_equal expected, @ui.output
+    assert_equal "", @ui.error
+
+    assert_includes @fetcher.paths, "#{@new_repo}/versions"
+
+    # only the presence of the index is checked, it is never downloaded
+    assert_empty @fetcher.requests
+    refute_includes @fetcher.paths, "#{@new_repo}/specs.#{@marshal_version}.gz"
+  end
+
+  def test_execute_append_compact_index_source
+    setup_fake_compact_index_source(@new_repo)
+
+    @cmd.handle_options %W[--append #{@new_repo}]
+
+    use_ui @ui do
+      @cmd.execute
+    end
+
+    assert_equal [@gem_repo, @new_repo], Gem.sources
+
+    expected = <<-EOF
+#{@new_repo} added to sources
+    EOF
+
+    assert_equal expected, @ui.output
+    assert_equal "", @ui.error
+
+    assert_empty @fetcher.requests
+  end
+
   def test_execute_add_allow_typo_squatting_source
     rubygems_org = "https://rubyems.org"
 
@@ -1003,5 +1049,14 @@ beta-gems.example.com/ is not a URI
     end
 
     @fetcher.data["#{uri.chomp("/")}/specs.#{@marshal_version}.gz"] = specs_dump_gz.string
+  end
+
+  def setup_fake_compact_index_source(uri)
+    spec_fetcher
+
+    response = Gem::Net::HTTPResponse.new "1.1", 200, "OK"
+    response.uri = Gem::URI("#{uri}/versions")
+
+    @fetcher.data["#{uri}/versions"] = response
   end
 end
